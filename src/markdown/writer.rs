@@ -4,21 +4,55 @@ use super::config::{MarkdownOptions, TableStyle};
 /// This module provides the `MarkdownWriter` struct which handles the actual
 /// conversion of document elements to Markdown format.
 ///
-/// **Note**: Some functionality requires the `ole` or `ooxml` feature to be enabled.
+/// **Note**: Some functionality requires document or presentation format features
+/// (e.g., `ole`, `ooxml`, `rtf`, `odf`, or `iwa`) to be enabled.
 use crate::common::{Error, Metadata, Result};
-#[cfg(any(feature = "ole", feature = "ooxml"))]
+#[cfg(any(
+    feature = "ole",
+    feature = "ooxml",
+    feature = "odf",
+    feature = "rtf",
+    feature = "iwa",
+))]
 use crate::document::{Cell, Paragraph, Run, Table};
 use std::fmt::Write as FmtWrite;
 
-#[cfg(any(feature = "ole", feature = "ooxml"))]
+#[cfg(any(
+    feature = "ole",
+    feature = "ooxml",
+    feature = "odf",
+    feature = "rtf",
+    feature = "iwa",
+))]
 use memchr::memchr;
 
-#[cfg(any(feature = "ole", feature = "ooxml"))]
+#[cfg(any(
+    feature = "ole",
+    feature = "ooxml",
+    feature = "odf",
+    feature = "rtf",
+    feature = "iwa",
+))]
+use rayon::iter::IntoParallelRefIterator;
+
+#[cfg(any(
+    feature = "ole",
+    feature = "ooxml",
+    feature = "odf",
+    feature = "rtf",
+    feature = "iwa",
+))]
 use rayon::prelude::*;
 
 /// Minimum number of table rows to justify parallel processing overhead.
 /// Tables are typically smaller than documents, so we use a lower threshold.
-#[cfg(any(feature = "ole", feature = "ooxml"))]
+#[cfg(any(
+    feature = "ole",
+    feature = "ooxml",
+    feature = "odf",
+    feature = "rtf",
+    feature = "iwa",
+))]
 const TABLE_PARALLEL_THRESHOLD: usize = 20;
 
 /// Information about a detected list item.
@@ -308,7 +342,8 @@ impl MarkdownWriter {
 
     /// Write a paragraph to the buffer.
     ///
-    /// **Note**: This method requires the `ole` or `ooxml` feature to be enabled.
+    /// **Note**: This method requires at least one of the document format features
+    /// (`ole`, `ooxml`, `rtf`, `odf`, or `iwa`) to be enabled.
     ///
     /// **Performance**: Optimized to avoid redundant XML parsing by extracting runs
     /// once and deriving text from them when needed.
@@ -569,10 +604,8 @@ impl MarkdownWriter {
 
     /// Write a run with formatting.
     ///
-    /// **Note**: This method requires the `ole` or `ooxml` feature to be enabled.
-    ///
-    /// **Performance**: For OOXML runs, this uses a single XML parse to extract both
-    /// text and properties simultaneously, providing 2x speedup over separate calls.
+    /// This method is available when at least one of the document-oriented
+    /// features (`ole`, `ooxml`, `rtf`, `odf`, or `iwa`) is enabled.
     #[cfg(any(
         feature = "ole",
         feature = "ooxml",
@@ -581,163 +614,107 @@ impl MarkdownWriter {
         feature = "iwa"
     ))]
     pub fn write_run(&mut self, run: &Run) -> Result<()> {
-        // First check if this run contains a formula
         if let Some(formula_markdown) = self.extract_formula_from_run(run)? {
             self.buffer.push_str(&formula_markdown);
             return Ok(());
         }
 
-        // OPTIMIZATION: Get text AND properties in a single XML parse
-        // This is 2x faster than calling text() then get_properties()
-        #[cfg(feature = "ooxml")]
-        let (text, bold, italic, strikethrough, vertical_pos) =
-            if let crate::document::Run::Docx(docx_run) = run {
-                let (text, props) = docx_run.get_text_and_properties()?;
-                if text.is_empty() {
-                    return Ok(());
-                }
-                (
-                    text,
-                    props.bold.unwrap_or(false),
-                    props.italic.unwrap_or(false),
-                    props.strikethrough.unwrap_or(false),
-                    props.vertical_position,
-                )
-            } else {
-                // Fallback for non-OOXML runs (e.g., OLE format)
-                let text = run.text()?;
-                if text.is_empty() {
-                    return Ok(());
-                }
-                (
-                    text.to_string(),
-                    run.bold()?.unwrap_or(false),
-                    run.italic()?.unwrap_or(false),
-                    run.strikethrough()?.unwrap_or(false),
-                    run.vertical_position()?,
-                )
-            };
+        let text = run.text()?;
+        if text.is_empty() {
+            return Ok(());
+        }
 
-        #[cfg(all(feature = "ole", not(feature = "ooxml")))]
-        let (text, bold, italic, strikethrough, vertical_pos) = {
-            let text = run.text()?;
-            if text.is_empty() {
-                return Ok(());
-            }
-            (
-                text.to_string(),
-                run.bold()?.unwrap_or(false),
-                run.italic()?.unwrap_or(false),
-                run.strikethrough()?.unwrap_or(false),
-                run.vertical_position()?,
-            )
-        };
+        let bold = run.bold()?.unwrap_or(false);
+        let italic = run.italic()?.unwrap_or(false);
+        let strikethrough = run.strikethrough()?.unwrap_or(false);
+        let vertical_pos = run.vertical_position()?;
 
-        // Handle vertical position (superscript/subscript)
-        // Note: vertical_position() is available when ole or ooxml features are enabled
-        #[cfg(any(feature = "ole", feature = "ooxml"))]
-        {
+        self.write_run_with_properties(text, bold, italic, strikethrough, vertical_pos)
+    }
+
+    #[cfg(any(
+        feature = "ole",
+        feature = "ooxml",
+        feature = "odf",
+        feature = "rtf",
+        feature = "iwa"
+    ))]
+    fn write_run_with_properties(
+        &mut self,
+        text: String,
+        bold: bool,
+        italic: bool,
+        strikethrough: bool,
+        vertical_pos: Option<crate::common::VerticalPosition>,
+    ) -> Result<()> {
+        let mut needed_capacity = text.len();
+        if vertical_pos.is_some() {
+            needed_capacity += 11; // <sup></sup> or <sub></sub>
+        }
+        if strikethrough {
+            needed_capacity += 9; // ~~ or <del></del>
+        }
+        if bold && italic {
+            needed_capacity += 6; // ***
+        } else if bold || italic {
+            needed_capacity += 4; // ** or *
+        }
+        self.buffer.reserve(needed_capacity);
+
+        if let Some(pos) = vertical_pos {
             use crate::common::VerticalPosition;
 
-            // Pre-calculate buffer size needed to minimize reallocations
-            let mut needed_capacity = text.len();
-            if vertical_pos.is_some() {
-                needed_capacity += 11; // <sup></sup> or <sub></sub>
-            }
-            if strikethrough {
-                needed_capacity += 9; // ~~ or <del></del>
-            }
-            if bold && italic {
-                needed_capacity += 6; // ***
-            } else if bold || italic {
-                needed_capacity += 4; // ** or *
-            }
-
-            // Reserve capacity to avoid reallocations
-            self.buffer.reserve(needed_capacity);
-
-            // For superscript/subscript, we apply them directly and skip other formatting
-            if let Some(pos) = vertical_pos {
-                match self.options.script_style {
-                    super::config::ScriptStyle::Html => match pos {
-                        VerticalPosition::Superscript => {
+            match self.options.script_style {
+                super::config::ScriptStyle::Html => match pos {
+                    VerticalPosition::Superscript => {
+                        self.buffer.push_str("<sup>");
+                        self.buffer.push_str(&text);
+                        self.buffer.push_str("</sup>");
+                    },
+                    VerticalPosition::Subscript => {
+                        self.buffer.push_str("<sub>");
+                        self.buffer.push_str(&text);
+                        self.buffer.push_str("</sub>");
+                    },
+                    VerticalPosition::Normal => {
+                        self.buffer.push_str(&text);
+                    },
+                },
+                super::config::ScriptStyle::Unicode => match pos {
+                    VerticalPosition::Superscript => {
+                        if super::unicode::can_convert_to_superscript(&text) {
+                            let converted = super::unicode::convert_to_superscript(&text);
+                            self.buffer.push_str(&converted);
+                        } else {
                             self.buffer.push_str("<sup>");
                             self.buffer.push_str(&text);
                             self.buffer.push_str("</sup>");
-                        },
-                        VerticalPosition::Subscript => {
+                        }
+                    },
+                    VerticalPosition::Subscript => {
+                        if super::unicode::can_convert_to_subscript(&text) {
+                            let converted = super::unicode::convert_to_subscript(&text);
+                            self.buffer.push_str(&converted);
+                        } else {
                             self.buffer.push_str("<sub>");
                             self.buffer.push_str(&text);
                             self.buffer.push_str("</sub>");
-                        },
-                        VerticalPosition::Normal => {
-                            self.buffer.push_str(&text);
-                        },
-                    },
-                    super::config::ScriptStyle::Unicode => {
-                        // Convert to Unicode superscript/subscript characters
-                        // Fall back to HTML tags for characters without Unicode equivalents
-                        match pos {
-                            VerticalPosition::Superscript => {
-                                if super::unicode::can_convert_to_superscript(&text) {
-                                    // All characters can be converted to superscript
-                                    let converted = super::unicode::convert_to_superscript(&text);
-                                    self.buffer.push_str(&converted);
-                                } else {
-                                    // Fall back to HTML for partial support
-                                    self.buffer.push_str("<sup>");
-                                    self.buffer.push_str(&text);
-                                    self.buffer.push_str("</sup>");
-                                }
-                            },
-                            VerticalPosition::Subscript => {
-                                if super::unicode::can_convert_to_subscript(&text) {
-                                    // All characters can be converted to subscript
-                                    let converted = super::unicode::convert_to_subscript(&text);
-                                    self.buffer.push_str(&converted);
-                                } else {
-                                    // Fall back to HTML for partial support
-                                    self.buffer.push_str("<sub>");
-                                    self.buffer.push_str(&text);
-                                    self.buffer.push_str("</sub>");
-                                }
-                            },
-                            VerticalPosition::Normal => {
-                                self.buffer.push_str(&text);
-                            },
                         }
                     },
-                }
-                return Ok(());
+                    VerticalPosition::Normal => {
+                        self.buffer.push_str(&text);
+                    },
+                },
             }
+
+            return Ok(());
         }
 
-        // Pre-calculate buffer size for non-vertical-position formatting
-        #[cfg(not(any(feature = "ole", feature = "ooxml")))]
-        {
-            let mut needed_capacity = text.len();
-            if strikethrough {
-                needed_capacity += 9; // ~~ or <del></del>
-            }
-            if bold && italic {
-                needed_capacity += 6; // ***
-            } else if bold || italic {
-                needed_capacity += 4; // ** or *
-            }
-            self.buffer.reserve(needed_capacity);
-        }
-
-        // Apply formatting changes (only add/remove markers when formatting changes)
-        // Note: For HTML strikethrough style, we need special handling since HTML
-        // tags can't be left open across runs
         if self.options.strikethrough_style == super::config::StrikethroughStyle::Html
             && strikethrough
         {
-            // HTML strikethrough: must be self-contained per run
-            // Close any open markdown formatting first
             self.close_formatting();
 
-            // Apply HTML strikethrough with inline markdown formatting
             self.buffer.push_str("<del>");
             match (bold, italic) {
                 (true, true) => {
@@ -761,7 +738,6 @@ impl MarkdownWriter {
             }
             self.buffer.push_str("</del>");
         } else {
-            // Markdown-style formatting: can span across runs
             self.apply_formatting(bold, italic, strikethrough);
             self.buffer.push_str(&text);
         }
@@ -771,7 +747,8 @@ impl MarkdownWriter {
 
     /// Write a table to the buffer.
     ///
-    /// **Note**: This method requires the `ole` or `ooxml` feature to be enabled.
+    /// **Note**: This method requires at least one of the document format features
+    /// (`ole`, `ooxml`, `rtf`, `odf`, or `iwa`) to be enabled.
     #[cfg(any(
         feature = "ole",
         feature = "ooxml",

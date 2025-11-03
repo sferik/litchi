@@ -6,7 +6,8 @@ use super::writer::MarkdownWriter;
 /// This module implements the `ToMarkdown` trait for PowerPoint presentation types,
 /// including Presentation and Slide.
 ///
-/// **Note**: This module is only available when the `ole` or `ooxml` feature is enabled.
+/// **Note**: This module is only available when a presentation format feature such as
+/// `ole`, `ooxml`, `odf`, or `iwa` is enabled.
 use crate::common::Result;
 use crate::presentation::{Presentation, Slide};
 use rayon::prelude::*;

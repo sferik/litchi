@@ -94,8 +94,15 @@ impl Run {
     ///
     /// Returns the vertical positioning if specified, None if normal.
     ///
-    /// **Note**: This method requires the `ole` or `ooxml` feature to be enabled.
-    #[cfg(any(feature = "ole", feature = "ooxml", feature = "iwa"))]
+    /// **Note**: This method requires at least one of the document format features
+    /// (`ole`, `ooxml`, `iwa`, `rtf`, or `odf`) to be enabled.
+    #[cfg(any(
+        feature = "ole",
+        feature = "ooxml",
+        feature = "iwa",
+        feature = "rtf",
+        feature = "odf",
+    ))]
     pub fn vertical_position(&self) -> Result<Option<crate::common::VerticalPosition>> {
         use crate::common::VerticalPosition;
 
