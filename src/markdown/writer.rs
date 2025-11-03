@@ -6,19 +6,43 @@ use super::config::{MarkdownOptions, TableStyle};
 ///
 /// **Note**: Some functionality requires the `ole` or `ooxml` feature to be enabled.
 use crate::common::{Error, Metadata, Result};
-#[cfg(any(feature = "ole", feature = "ooxml"))]
+#[cfg(any(
+    feature = "ole",
+    feature = "ooxml",
+    feature = "odf",
+    feature = "rtf",
+    feature = "iwa",
+))]
 use crate::document::{Cell, Paragraph, Run, Table};
 use std::fmt::Write as FmtWrite;
 
-#[cfg(any(feature = "ole", feature = "ooxml"))]
+#[cfg(any(
+    feature = "ole",
+    feature = "ooxml",
+    feature = "odf",
+    feature = "rtf",
+    feature = "iwa",
+))]
 use memchr::memchr;
 
-#[cfg(any(feature = "ole", feature = "ooxml"))]
+#[cfg(any(
+    feature = "ole",
+    feature = "ooxml",
+    feature = "odf",
+    feature = "rtf",
+    feature = "iwa",
+))]
 use rayon::prelude::*;
 
 /// Minimum number of table rows to justify parallel processing overhead.
 /// Tables are typically smaller than documents, so we use a lower threshold.
-#[cfg(any(feature = "ole", feature = "ooxml"))]
+#[cfg(any(
+    feature = "ole",
+    feature = "ooxml",
+    feature = "odf",
+    feature = "rtf",
+    feature = "iwa",
+))]
 const TABLE_PARALLEL_THRESHOLD: usize = 20;
 
 /// Information about a detected list item.
@@ -214,6 +238,54 @@ impl MarkdownWriter {
             current_italic: false,
             current_strikethrough: false,
         }
+    }
+
+    #[cfg(any(
+        feature = "ole",
+        feature = "ooxml",
+        feature = "odf",
+        feature = "rtf",
+        feature = "iwa",
+    ))]
+    fn extract_run_text_and_formatting(
+        run: &Run,
+    ) -> Result<
+        Option<(
+            String,
+            bool,
+            bool,
+            bool,
+            Option<crate::common::VerticalPosition>,
+        )>,
+    > {
+        #[cfg(feature = "ooxml")]
+        if let crate::document::Run::Docx(docx_run) = run {
+            let (text, props) = docx_run.get_text_and_properties()?;
+            if text.is_empty() {
+                return Ok(None);
+            }
+
+            return Ok(Some((
+                text,
+                props.bold.unwrap_or(false),
+                props.italic.unwrap_or(false),
+                props.strikethrough.unwrap_or(false),
+                props.vertical_position,
+            )));
+        }
+
+        let text = run.text()?;
+        if text.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some((
+            text,
+            run.bold()?.unwrap_or(false),
+            run.italic()?.unwrap_or(false),
+            run.strikethrough()?.unwrap_or(false),
+            run.vertical_position()?,
+        )))
     }
 
     /// Write a paragraph to the buffer.
@@ -499,48 +571,10 @@ impl MarkdownWriter {
 
         // OPTIMIZATION: Get text AND properties in a single XML parse
         // This is 2x faster than calling text() then get_properties()
-        #[cfg(feature = "ooxml")]
-        let (text, bold, italic, strikethrough, vertical_pos) =
-            if let crate::document::Run::Docx(docx_run) = run {
-                let (text, props) = docx_run.get_text_and_properties()?;
-                if text.is_empty() {
-                    return Ok(());
-                }
-                (
-                    text,
-                    props.bold.unwrap_or(false),
-                    props.italic.unwrap_or(false),
-                    props.strikethrough.unwrap_or(false),
-                    props.vertical_position,
-                )
-            } else {
-                // Fallback for non-OOXML runs (e.g., OLE format)
-                let text = run.text()?;
-                if text.is_empty() {
-                    return Ok(());
-                }
-                (
-                    text.to_string(),
-                    run.bold()?.unwrap_or(false),
-                    run.italic()?.unwrap_or(false),
-                    run.strikethrough()?.unwrap_or(false),
-                    run.vertical_position()?,
-                )
-            };
-
-        #[cfg(all(feature = "ole", not(feature = "ooxml")))]
-        let (text, bold, italic, strikethrough, vertical_pos) = {
-            let text = run.text()?;
-            if text.is_empty() {
-                return Ok(());
-            }
-            (
-                text.to_string(),
-                run.bold()?.unwrap_or(false),
-                run.italic()?.unwrap_or(false),
-                run.strikethrough()?.unwrap_or(false),
-                run.vertical_position()?,
-            )
+        let Some((text, bold, italic, strikethrough, vertical_pos)) =
+            Self::extract_run_text_and_formatting(run)?
+        else {
+            return Ok(());
         };
 
         // Handle vertical position (superscript/subscript)
